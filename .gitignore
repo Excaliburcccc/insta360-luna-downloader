@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.spec
+
+# Local captures and personal media.
+*.pcap
+*.pcapng
+downloads/
+test_download/
+*.mp4
+*.lrv
+*.insp
+*.insv
+
+# Local settings.
+.env
+*.log
+
