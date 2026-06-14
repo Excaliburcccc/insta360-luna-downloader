@@ -71,11 +71,13 @@ class MainWindow(QMainWindow):
         self.host_input = QLineEdit(DEFAULT_HOST)
         self.host_input.setFixedWidth(140)
         self.refresh_button = QPushButton("连接")
+        self.manual_refresh_button = QPushButton("刷新")
         connection_row.addWidget(QLabel("相机 IP:"))
         connection_row.addWidget(self.host_input)
         connection_row.addWidget(self.connection_indicator)
         connection_row.addWidget(self.connection_label, 1)
         connection_row.addWidget(self.refresh_button)
+        connection_row.addWidget(self.manual_refresh_button)
         layout.addLayout(connection_row)
         self.set_connection_state("disconnected", self.connection_label.text())
 
@@ -134,6 +136,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log)
 
         self.refresh_button.clicked.connect(self.connect_to_luna)
+        self.manual_refresh_button.clicked.connect(self.manual_refresh_files)
         self.choose_folder_button.clicked.connect(self.choose_download_folder)
         self.download_button.clicked.connect(self.start_download)
         self.cancel_button.clicked.connect(self.cancel_download)
@@ -176,6 +179,28 @@ class MainWindow(QMainWindow):
         self.connection_worker = worker
         thread.start()
 
+    def manual_refresh_files(self) -> None:
+        self.populate_table()
+        if self.connection_thread is None or self.worker_thread is not None:
+            return
+
+        self.manual_refresh_button.setEnabled(False)
+        self.log_message("正在刷新文件列表...")
+        worker = FileListWorker(self.host())
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status.connect(self.log_message)
+        worker.finished.connect(self.on_manual_files_loaded)
+        worker.failed.connect(self.on_manual_refresh_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self.clear_manual_refresh_worker)
+        self.worker_thread = thread
+        self.active_worker = worker
+        thread.start()
+
     def refresh_files(self) -> None:
         self.connect_to_luna()
 
@@ -209,14 +234,35 @@ class MainWindow(QMainWindow):
         self.set_busy(False)
 
     def on_connection_disconnected(self, message: str) -> None:
-        self.set_connection_state("connecting", "连接断开，正在自动重试...")
-        self.log_message(f"连接保持失败，正在重试：{message}")
+        self.set_connection_state("disconnected", "连接已断开 - 请确认 Luna Wi-Fi 后重新连接")
+        self.refresh_button.setText("连接")
+        self.refresh_button.setEnabled(True)
+        self.log_message(f"连接已断开：{message}")
 
     def clear_connection_worker(self) -> None:
         self.connection_thread = None
         self.connection_worker = None
         self.refresh_button.setText("连接")
         self.refresh_button.setEnabled(True)
+
+    def on_manual_files_loaded(self, files: list[LunaFile]) -> None:
+        self.files = files
+        self.set_connection_state("connected", f"已连接 - 共 {len(files)} 个文件")
+        self.log_message(f"已刷新 Luna 文件列表，共 {len(files)} 个文件。")
+        self.populate_table()
+
+    def on_manual_refresh_failed(self, message: str) -> None:
+        self.set_connection_state("disconnected", "连接已断开 - 请确认 Luna Wi-Fi 后重新连接")
+        self.refresh_button.setText("连接")
+        self.refresh_button.setEnabled(True)
+        self.log_message(f"刷新失败：{message}")
+        if self.connection_worker is not None:
+            self.connection_worker.stop()
+
+    def clear_manual_refresh_worker(self) -> None:
+        self.worker_thread = None
+        self.active_worker = None
+        self.manual_refresh_button.setEnabled(True)
 
     def on_files_loaded(self, files: list[LunaFile]) -> None:
         self.files = files

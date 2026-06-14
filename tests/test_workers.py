@@ -1,9 +1,10 @@
 from pathlib import Path
+import threading
 
 import luna_downloader.workers as workers
 from luna_downloader.downloader import DownloadCancelled
 from luna_downloader.models import LunaFile
-from luna_downloader.workers import DownloadWorker
+from luna_downloader.workers import ConnectionWorker, DownloadWorker
 
 
 class FakeClient:
@@ -152,3 +153,39 @@ def test_download_worker_keeps_auth_alive_and_reauths_before_each_file(monkeypat
     assert clients[0].close_count == 1
     assert keepers[0].start_count == 1
     assert keepers[0].stop_count == 1
+
+
+def test_connection_worker_stops_after_disconnect(monkeypatch):
+    clients = []
+
+    class FlakyClient:
+        def __init__(self, _host: str):
+            self.connect_count = 0
+            self.close_count = 0
+            clients.append(self)
+
+        def connect(self):
+            self.connect_count += 1
+            if self.connect_count > 1:
+                raise OSError("network lost")
+
+        def list_files(self):
+            return [make_item()]
+
+        def close(self):
+            self.close_count += 1
+
+    monkeypatch.setattr(workers, "LunaClient", FlakyClient)
+    worker = ConnectionWorker("127.0.0.1", interval=0.001)
+
+    thread = threading.Thread(target=worker.run)
+    thread.start()
+    thread.join(timeout=0.2)
+    still_running = thread.is_alive()
+    if still_running:
+        worker.stop()
+        thread.join(timeout=1)
+
+    assert not still_running
+    assert clients[0].connect_count == 2
+    assert clients[0].close_count == 1

@@ -38,7 +38,7 @@ class ConnectionWorker(QObject):
     disconnected = Signal(str)
     status = Signal(str)
 
-    def __init__(self, host: str = DEFAULT_HOST, interval: float = 20.0):
+    def __init__(self, host: str = DEFAULT_HOST, interval: float = 5.0):
         super().__init__()
         self.host = host
         self.interval = interval
@@ -50,23 +50,23 @@ class ConnectionWorker(QObject):
     @Slot()
     def run(self) -> None:
         client = LunaClient(self.host)
-        was_connected = False
         try:
-            while not self.stop_event.is_set():
-                try:
-                    if was_connected:
-                        client.connect()
-                    else:
-                        self.status.emit("正在打开 Luna 授权会话...")
-                        client.connect()
-                        self.status.emit("正在读取相机文件列表...")
-                        self.connected.emit(client.list_files())
-                        was_connected = True
-                except Exception as exc:
-                    was_connected = False
-                    self.disconnected.emit(str(exc))
+            try:
+                self.status.emit("正在打开 Luna 授权会话...")
+                client.connect()
+                self.status.emit("正在读取相机文件列表...")
+                self.connected.emit(client.list_files())
+            except Exception as exc:
+                self.disconnected.emit(str(exc))
+                return
 
-                self.stop_event.wait(self.interval)
+            while not self.stop_event.wait(self.interval):
+                try:
+                    client.connect()
+                    client.list_files()
+                except Exception as exc:
+                    self.disconnected.emit(str(exc))
+                    return
         finally:
             client.close()
 

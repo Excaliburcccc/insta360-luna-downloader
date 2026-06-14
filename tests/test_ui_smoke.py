@@ -15,6 +15,7 @@ def test_main_window_contains_required_controls():
 
     assert "未连接" in window.connection_label.text()
     assert window.refresh_button.text() == "连接"
+    assert window.manual_refresh_button.text() == "刷新"
     assert window.download_button.text() == "开始下载"
     assert window.choose_folder_button.text() == "选择文件夹"
     assert window.connection_indicator.text() == "●"
@@ -80,4 +81,35 @@ def test_populate_table_restores_partial_status_from_download_folder(tmp_path: P
     window.populate_table()
 
     assert window.file_table.item(0, 5).text() == "可继续"
+    assert app is not None
+
+
+def test_manual_refresh_updates_local_file_status(tmp_path: Path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    item = make_item()
+
+    window.download_path.setText(str(tmp_path))
+    window.files = [item]
+    window.populate_table()
+    assert window.file_table.item(0, 5).text() == "就绪"
+
+    (tmp_path / item.name).write_bytes(b"done")
+    window.manual_refresh_files()
+
+    assert window.file_table.item(0, 5).text() == "完成"
+    assert app is not None
+
+
+def test_connection_disconnect_releases_connect_button():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.refresh_button.setText("已连接")
+    window.refresh_button.setEnabled(False)
+
+    window.on_connection_disconnected("network lost")
+
+    assert window.refresh_button.text() == "连接"
+    assert window.refresh_button.isEnabled()
+    assert "断开" in window.connection_label.text()
     assert app is not None
