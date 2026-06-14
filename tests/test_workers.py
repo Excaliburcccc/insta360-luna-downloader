@@ -30,6 +30,25 @@ def make_item() -> LunaFile:
     )
 
 
+def make_items(count: int) -> list[LunaFile]:
+    items = []
+    for index in range(count):
+        name = f"sample-{index}.mp4"
+        items.append(
+            LunaFile(
+                name=name,
+                href=name,
+                url=f"http://127.0.0.1/{name}",
+                date="14-Jun-2026",
+                time="12:13",
+                size_text="16",
+                bytes=16,
+                kind="MP4",
+            )
+        )
+    return items
+
+
 def test_download_worker_emits_cancelled_instead_of_file_finished(monkeypatch, tmp_path: Path):
     item = make_item()
 
@@ -85,3 +104,51 @@ def test_download_worker_emits_cancelled_when_cancelled_before_first_file(monkey
     assert file_finished == []
     assert failed == []
     assert finished == [True]
+
+
+def test_download_worker_keeps_auth_alive_and_reauths_before_each_file(monkeypatch, tmp_path: Path):
+    clients = []
+    keepers = []
+    downloaded = []
+
+    class CountingClient:
+        def __init__(self, _host: str):
+            self.connect_count = 0
+            self.close_count = 0
+            clients.append(self)
+
+        def connect(self):
+            self.connect_count += 1
+
+        def close(self):
+            self.close_count += 1
+
+    class FakeKeeper:
+        def __init__(self, client, interval=20.0):
+            self.client = client
+            self.interval = interval
+            self.start_count = 0
+            self.stop_count = 0
+            keepers.append(self)
+
+        def start(self):
+            self.start_count += 1
+
+        def stop(self):
+            self.stop_count += 1
+
+    def fake_download_file(item, destination, _progress, _cancel_event):
+        downloaded.append((item.name, destination.name))
+
+    monkeypatch.setattr(workers, "LunaClient", CountingClient)
+    monkeypatch.setattr(workers, "LunaConnectionKeeper", FakeKeeper)
+    monkeypatch.setattr(workers, "download_file", fake_download_file)
+
+    worker = DownloadWorker(make_items(2), tmp_path, "127.0.0.1")
+    worker.run()
+
+    assert [name for name, _dest in downloaded] == ["sample-0.mp4", "sample-1.mp4"]
+    assert clients[0].connect_count == 3
+    assert clients[0].close_count == 1
+    assert keepers[0].start_count == 1
+    assert keepers[0].stop_count == 1

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import socket
+import threading
 import time
 from html import unescape
 from urllib.parse import urljoin
@@ -142,10 +143,7 @@ class LunaAuthSession:
             try:
                 sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
                 sock.settimeout(self.timeout)
-                for payload in AUTH_PAYLOADS:
-                    sock.sendall(payload)
-                    time.sleep(0.03)
-                self._drain_response(sock)
+                self._send_auth(sock)
                 self._socket = sock
                 return
             except OSError as exc:
@@ -157,6 +155,17 @@ class LunaAuthSession:
         if last_error is not None:
             raise last_error
         raise ConnectionError(f"Could not open Luna control session to {self.host}:{self.port}")
+
+    def refresh(self) -> None:
+        if self._socket is None:
+            self.open()
+            return
+
+        try:
+            self._send_auth(self._socket)
+        except OSError:
+            self.close()
+            self.open()
 
     def close(self) -> None:
         if self._socket is not None:
@@ -170,17 +179,26 @@ class LunaAuthSession:
     def __exit__(self, _exc_type, _exc, _tb) -> None:
         self.close()
 
+    def _send_auth(self, sock: socket.socket) -> None:
+        for payload in AUTH_PAYLOADS:
+            sock.sendall(payload)
+            time.sleep(0.03)
+        self._drain_response(sock)
+
     def _drain_response(self, sock: socket.socket) -> None:
+        previous_timeout = sock.gettimeout()
         deadline = time.monotonic() + 0.2
         sock.settimeout(0.05)
-        while time.monotonic() < deadline:
-            try:
-                data = sock.recv(65536)
-            except socket.timeout:
-                return
-            if not data:
-                return
-        sock.settimeout(self.timeout)
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    data = sock.recv(65536)
+                except socket.timeout:
+                    return
+                if not data:
+                    return
+        finally:
+            sock.settimeout(previous_timeout)
 
 
 class LunaClient:
@@ -188,15 +206,19 @@ class LunaClient:
         self.host = host
         self.camera_url = f"http://{host}/storage_internal/DCIM/Camera01/"
         self.auth_session: LunaAuthSession | None = None
+        self._lock = threading.RLock()
 
     def connect(self) -> None:
-        self.auth_session = LunaAuthSession(self.host)
-        self.auth_session.open()
+        with self._lock:
+            if self.auth_session is None:
+                self.auth_session = LunaAuthSession(self.host)
+            self.auth_session.refresh()
 
     def close(self) -> None:
-        if self.auth_session is not None:
-            self.auth_session.close()
-            self.auth_session = None
+        with self._lock:
+            if self.auth_session is not None:
+                self.auth_session.close()
+                self.auth_session = None
 
     def list_files(self) -> list[LunaFile]:
         request = Request(
@@ -229,3 +251,31 @@ class LunaClient:
             message = "已检测到 Luna 相机"
 
         return ConnectionStatus(self.host, http_ok, control_ok, message)
+
+
+class LunaConnectionKeeper:
+    def __init__(self, client: LunaClient, interval: float = 20.0):
+        self.client = client
+        self.interval = interval
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name="luna-keepalive", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            try:
+                self.client.connect()
+            except OSError:
+                continue

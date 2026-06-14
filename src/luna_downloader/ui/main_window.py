@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from ..luna_client import DEFAULT_HOST
 from ..models import DownloadProgress, LunaFile
-from ..workers import DownloadWorker, FileListWorker
+from ..workers import ConnectionWorker, DownloadWorker, FileListWorker
 
 PROGRESS_SCALE = 10_000
 
@@ -50,6 +50,10 @@ class MainWindow(QMainWindow):
         self.resize(980, 680)
 
         self.files: list[LunaFile] = []
+        self.connection_thread: QThread | None = None
+        self.connection_worker: ConnectionWorker | None = None
+        self.download_thread: QThread | None = None
+        self.download_worker: DownloadWorker | None = None
         self.worker_thread: QThread | None = None
         self.active_worker = None
         self.completed_files = 0
@@ -60,16 +64,20 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         connection_row = QHBoxLayout()
-        self.connection_label = QLabel("未连接 - 请先让电脑连接 Luna Wi-Fi，然后刷新")
+        self.connection_indicator = QLabel("●")
+        self.connection_indicator.setFixedWidth(18)
+        self.connection_label = QLabel("未连接 - 请先让电脑连接 Luna Wi-Fi，然后点击连接")
         self.connection_label.setStyleSheet("font-weight: 600;")
         self.host_input = QLineEdit(DEFAULT_HOST)
         self.host_input.setFixedWidth(140)
-        self.refresh_button = QPushButton("刷新文件")
+        self.refresh_button = QPushButton("连接")
         connection_row.addWidget(QLabel("相机 IP:"))
         connection_row.addWidget(self.host_input)
+        connection_row.addWidget(self.connection_indicator)
         connection_row.addWidget(self.connection_label, 1)
         connection_row.addWidget(self.refresh_button)
         layout.addLayout(connection_row)
+        self.set_connection_state("disconnected", self.connection_label.text())
 
         filter_row = QHBoxLayout()
         self.filter_combo = QComboBox()
@@ -125,7 +133,7 @@ class MainWindow(QMainWindow):
         self.log.setMaximumBlockCount(500)
         layout.addWidget(self.log)
 
-        self.refresh_button.clicked.connect(self.refresh_files)
+        self.refresh_button.clicked.connect(self.connect_to_luna)
         self.choose_folder_button.clicked.connect(self.choose_download_folder)
         self.download_button.clicked.connect(self.start_download)
         self.cancel_button.clicked.connect(self.cancel_download)
@@ -138,7 +146,40 @@ class MainWindow(QMainWindow):
     def host(self) -> str:
         return self.host_input.text().strip() or DEFAULT_HOST
 
+    def set_connection_state(self, state: str, message: str) -> None:
+        colors = {
+            "connected": "#15803d",
+            "connecting": "#ca8a04",
+            "disconnected": "#b91c1c",
+        }
+        color = colors.get(state, colors["disconnected"])
+        self.connection_indicator.setStyleSheet(f"color: {color}; font-size: 18px; font-weight: 700;")
+        self.connection_label.setText(message)
+
+    def connect_to_luna(self) -> None:
+        if self.connection_thread is not None:
+            return
+        self.set_connection_state("connecting", "正在连接 Luna...")
+        self.refresh_button.setText("连接中...")
+        self.refresh_button.setEnabled(False)
+
+        worker = ConnectionWorker(self.host())
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status.connect(self.log_message)
+        worker.connected.connect(self.on_connection_files_loaded)
+        worker.disconnected.connect(self.on_connection_disconnected)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self.clear_connection_worker)
+        self.connection_thread = thread
+        self.connection_worker = worker
+        thread.start()
+
     def refresh_files(self) -> None:
+        self.connect_to_luna()
+
+    def legacy_refresh_files(self) -> None:
         if self.worker_thread is not None:
             return
         self.set_busy(True)
@@ -158,6 +199,25 @@ class MainWindow(QMainWindow):
         self.active_worker = worker
         thread.start()
 
+    def on_connection_files_loaded(self, files: list[LunaFile]) -> None:
+        self.files = files
+        self.set_connection_state("connected", f"已连接 - 共 {len(files)} 个文件")
+        self.refresh_button.setText("已连接")
+        self.refresh_button.setEnabled(False)
+        self.log_message(f"已从 Luna 读取 {len(files)} 个文件。")
+        self.populate_table()
+        self.set_busy(False)
+
+    def on_connection_disconnected(self, message: str) -> None:
+        self.set_connection_state("connecting", "连接断开，正在自动重试...")
+        self.log_message(f"连接保持失败，正在重试：{message}")
+
+    def clear_connection_worker(self) -> None:
+        self.connection_thread = None
+        self.connection_worker = None
+        self.refresh_button.setText("连接")
+        self.refresh_button.setEnabled(True)
+
     def on_files_loaded(self, files: list[LunaFile]) -> None:
         self.files = files
         self.connection_label.setText(f"已连接 - 共 {len(files)} 个文件")
@@ -175,8 +235,13 @@ class MainWindow(QMainWindow):
         self.worker_thread = None
         self.active_worker = None
 
+    def clear_download_worker(self) -> None:
+        self.download_thread = None
+        self.download_worker = None
+        self.active_worker = None
+
     def set_busy(self, busy: bool) -> None:
-        self.refresh_button.setEnabled(not busy)
+        self.refresh_button.setEnabled(not busy and self.connection_thread is None)
         self.download_button.setEnabled(not busy and self.file_table.rowCount() > 0)
 
     def visible_files(self) -> list[LunaFile]:
@@ -200,8 +265,22 @@ class MainWindow(QMainWindow):
             self.file_table.setItem(row, 2, QTableWidgetItem(item.kind))
             self.file_table.setItem(row, 3, QTableWidgetItem(f"{item.date} {item.time}"))
             self.file_table.setItem(row, 4, QTableWidgetItem(item.size_text))
-            self.file_table.setItem(row, 5, QTableWidgetItem("就绪"))
+            self.file_table.setItem(row, 5, QTableWidgetItem(self.file_status(item)))
         self.download_button.setEnabled(self.file_table.rowCount() > 0)
+
+    def download_destination(self, item: LunaFile) -> Path:
+        return Path(self.download_path.text()).expanduser() / item.name
+
+    def file_status(self, item: LunaFile) -> str:
+        destination = self.download_destination(item)
+        if destination.exists():
+            return "完成"
+        if destination.with_name(destination.name + ".part").exists():
+            return "可继续"
+        return "就绪"
+
+    def is_download_complete(self, item: LunaFile) -> bool:
+        return self.download_destination(item).exists()
 
     def set_visible_selection(self, state: int) -> None:
         checked = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
@@ -220,13 +299,17 @@ class MainWindow(QMainWindow):
         for row in range(self.file_table.rowCount()):
             item = self.file_table.item(row, 0)
             if item and item.checkState() == Qt.CheckState.Checked:
-                selected.append(item.data(Qt.ItemDataRole.UserRole))
+                luna_file = item.data(Qt.ItemDataRole.UserRole)
+                if not self.is_download_complete(luna_file):
+                    selected.append(luna_file)
         return selected
 
     def start_download(self) -> None:
+        if self.download_thread is not None:
+            return
         files = self.selected_files()
         if not files:
-            QMessageBox.information(self, "Luna 下载器", "请至少选择一个要下载的文件。")
+            QMessageBox.information(self, "Luna 下载器", "请至少选择一个未完成的文件。")
             return
         out_dir = Path(self.download_path.text()).expanduser()
         self.completed_files = 0
@@ -248,13 +331,14 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self.on_download_progress)
         worker.file_finished.connect(self.on_file_finished)
         worker.cancelled.connect(self.on_download_cancelled)
-        worker.failed.connect(self.on_worker_failed)
+        worker.failed.connect(self.on_download_failed)
         worker.finished.connect(self.on_download_finished)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self.clear_worker)
-        self.worker_thread = thread
+        thread.finished.connect(self.clear_download_worker)
+        self.download_thread = thread
+        self.download_worker = worker
         self.active_worker = worker
         thread.start()
 
@@ -306,13 +390,27 @@ class MainWindow(QMainWindow):
             self.log_message("下载完成。")
         self.cancel_button.setEnabled(False)
         self.download_button.setEnabled(True)
-        self.refresh_button.setEnabled(True)
+        self.refresh_button.setEnabled(self.connection_thread is None)
+
+    def on_download_failed(self, message: str) -> None:
+        self.log_message(f"错误：{message}")
+        self.cancel_button.setEnabled(False)
+        self.download_button.setEnabled(True)
+        self.refresh_button.setEnabled(self.connection_thread is None)
+        QMessageBox.warning(self, "Luna 下载器", message)
 
     def update_file_status(self, name: str, status: str) -> None:
         for row in range(self.file_table.rowCount()):
             if self.file_table.item(row, 1).text() == name:
                 self.file_table.item(row, 5).setText(status)
                 break
+
+    def closeEvent(self, event) -> None:
+        if self.download_worker is not None:
+            self.download_worker.cancel()
+        if self.connection_worker is not None:
+            self.connection_worker.stop()
+        super().closeEvent(event)
 
 
 def run_app() -> int:

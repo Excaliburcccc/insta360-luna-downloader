@@ -1,9 +1,11 @@
 import socket
 import threading
 
+import luna_downloader.luna_client as luna_client
 from luna_downloader.luna_client import (
     AUTH_PAYLOADS,
     LunaAuthSession,
+    LunaClient,
     parse_luna_index,
     parse_size,
 )
@@ -70,3 +72,31 @@ def test_luna_auth_session_sends_expected_ucd2_messages():
         assert session.is_open
 
     assert received[1:] == AUTH_PAYLOADS
+
+
+def test_luna_client_reuses_existing_auth_session(monkeypatch):
+    sessions = []
+
+    class FakeAuthSession:
+        def __init__(self, host):
+            self.host = host
+            self.refresh_count = 0
+            self.close_count = 0
+            sessions.append(self)
+
+        def refresh(self):
+            self.refresh_count += 1
+
+        def close(self):
+            self.close_count += 1
+
+    monkeypatch.setattr(luna_client, "LunaAuthSession", FakeAuthSession)
+
+    client = LunaClient("127.0.0.1")
+    client.connect()
+    client.connect()
+    client.close()
+
+    assert len(sessions) == 1
+    assert sessions[0].refresh_count == 2
+    assert sessions[0].close_count == 1
