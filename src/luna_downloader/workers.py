@@ -23,9 +23,9 @@ class FileListWorker(QObject):
     def run(self) -> None:
         client = LunaClient(self.host)
         try:
-            self.status.emit("Opening Luna authorization session...")
+            self.status.emit("正在打开 Luna 授权会话...")
             client.connect()
-            self.status.emit("Reading camera file index...")
+            self.status.emit("正在读取相机文件列表...")
             self.finished.emit(client.list_files())
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -55,11 +55,11 @@ class DownloadWorker(QObject):
     def run(self) -> None:
         client = LunaClient(self.host)
         try:
-            self.status.emit("Opening Luna authorization session...")
+            self.status.emit("正在打开 Luna 授权会话...")
             client.connect()
             for item in self.files:
                 if self.cancel_event.is_set():
-                    self.status.emit("Download cancelled.")
+                    self.status.emit("下载已取消。")
                     break
                 self.file_started.emit(item.name)
                 destination = self.out_dir / item.name
@@ -70,4 +70,3 @@ class DownloadWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             client.close()
-

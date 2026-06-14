@@ -210,22 +210,22 @@ class LunaClient:
     def check_status(self) -> ConnectionStatus:
         http_ok = False
         control_ok = False
-        message = "Not connected"
+        message = "未连接"
 
         try:
             with socket.create_connection((self.host, 80), timeout=2):
                 http_ok = True
         except OSError as exc:
-            message = f"HTTP unavailable: {exc}"
+            message = f"HTTP 服务不可用：{exc}"
 
         try:
             with socket.create_connection((self.host, 6666), timeout=2):
                 control_ok = True
         except OSError as exc:
             if http_ok:
-                message = f"Control port unavailable: {exc}"
+                message = f"控制端口不可用：{exc}"
 
         if http_ok and control_ok:
-            message = "Luna camera reachable"
+            message = "已检测到 Luna 相机"
 
         return ConnectionStatus(self.host, http_ok, control_ok, message)
