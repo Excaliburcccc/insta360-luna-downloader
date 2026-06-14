@@ -27,6 +27,21 @@ from ..luna_client import DEFAULT_HOST
 from ..models import DownloadProgress, LunaFile
 from ..workers import DownloadWorker, FileListWorker
 
+PROGRESS_SCALE = 10_000
+
+
+def format_bytes(value: int | None) -> str:
+    if value is None:
+        return "未知"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    amount = float(value)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(amount):,} {unit}"
+            return f"{amount:.2f} {unit}"
+        amount /= 1024
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -38,6 +53,7 @@ class MainWindow(QMainWindow):
         self.worker_thread: QThread | None = None
         self.active_worker = None
         self.completed_files = 0
+        self.download_cancelled = False
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -98,6 +114,7 @@ class MainWindow(QMainWindow):
 
         self.current_file_label = QLabel("空闲")
         self.file_progress = QProgressBar()
+        self.file_progress.setRange(0, PROGRESS_SCALE)
         self.total_progress = QProgressBar()
         layout.addWidget(self.current_file_label)
         layout.addWidget(self.file_progress)
@@ -213,8 +230,10 @@ class MainWindow(QMainWindow):
             return
         out_dir = Path(self.download_path.text()).expanduser()
         self.completed_files = 0
+        self.download_cancelled = False
         self.total_progress.setMaximum(len(files))
         self.total_progress.setValue(0)
+        self.file_progress.setRange(0, PROGRESS_SCALE)
         self.file_progress.setValue(0)
         self.cancel_button.setEnabled(True)
         self.download_button.setEnabled(False)
@@ -228,6 +247,7 @@ class MainWindow(QMainWindow):
         worker.file_started.connect(self.on_file_started)
         worker.progress.connect(self.on_download_progress)
         worker.file_finished.connect(self.on_file_finished)
+        worker.cancelled.connect(self.on_download_cancelled)
         worker.failed.connect(self.on_worker_failed)
         worker.finished.connect(self.on_download_finished)
         worker.finished.connect(thread.quit)
@@ -245,26 +265,45 @@ class MainWindow(QMainWindow):
 
     def on_file_started(self, name: str) -> None:
         self.current_file_label.setText(f"正在下载 {name}")
+        self.file_progress.setRange(0, PROGRESS_SCALE)
         self.file_progress.setValue(0)
         self.update_file_status(name, "下载中")
 
     def on_download_progress(self, progress: DownloadProgress) -> None:
         if progress.total:
-            self.file_progress.setMaximum(progress.total)
-            self.file_progress.setValue(progress.downloaded)
+            percent = min(100.0, (progress.downloaded / progress.total) * 100)
+            scaled_value = min(PROGRESS_SCALE, int(progress.downloaded * PROGRESS_SCALE / progress.total))
+            self.file_progress.setRange(0, PROGRESS_SCALE)
+            self.file_progress.setValue(scaled_value)
+            total_text = format_bytes(progress.total)
+        else:
+            percent = 0.0
+            self.file_progress.setRange(0, PROGRESS_SCALE)
+            total_text = "未知"
         speed = progress.speed_bps / (1024 * 1024)
         self.current_file_label.setText(
-            f"{progress.file_name} - {progress.downloaded:,}/{progress.total or 0:,} 字节 - {speed:.1f} MB/s"
+            f"{progress.file_name} - {format_bytes(progress.downloaded)} / {total_text} - "
+            f"{percent:.2f}% - {speed:.1f} MB/s"
         )
 
     def on_file_finished(self, name: str) -> None:
         self.completed_files += 1
         self.total_progress.setValue(self.completed_files)
+        self.file_progress.setValue(PROGRESS_SCALE)
         self.update_file_status(name, "完成")
 
+    def on_download_cancelled(self, name: str) -> None:
+        self.download_cancelled = True
+        self.current_file_label.setText("下载已取消，可继续")
+        self.update_file_status(name, "已取消，可继续")
+
     def on_download_finished(self) -> None:
-        self.current_file_label.setText("下载完成")
-        self.log_message("下载完成。")
+        if self.download_cancelled:
+            self.current_file_label.setText("下载已取消，可继续")
+            self.log_message("下载已取消，可稍后继续。")
+        else:
+            self.current_file_label.setText("下载完成")
+            self.log_message("下载完成。")
         self.cancel_button.setEnabled(False)
         self.download_button.setEnabled(True)
         self.refresh_button.setEnabled(True)

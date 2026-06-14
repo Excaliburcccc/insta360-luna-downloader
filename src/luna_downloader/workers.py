@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .downloader import download_file
+from .downloader import DownloadCancelled, download_file
 from .luna_client import DEFAULT_HOST, LunaClient
 from .models import DownloadProgress, LunaFile
 
@@ -37,6 +37,7 @@ class DownloadWorker(QObject):
     progress = Signal(object)
     file_started = Signal(str)
     file_finished = Signal(str)
+    cancelled = Signal(str)
     finished = Signal()
     failed = Signal(str)
     status = Signal(str)
@@ -60,10 +61,16 @@ class DownloadWorker(QObject):
             for item in self.files:
                 if self.cancel_event.is_set():
                     self.status.emit("下载已取消。")
+                    self.cancelled.emit(item.name)
                     break
                 self.file_started.emit(item.name)
                 destination = self.out_dir / item.name
-                download_file(item, destination, self.progress.emit, self.cancel_event)
+                try:
+                    download_file(item, destination, self.progress.emit, self.cancel_event)
+                except DownloadCancelled:
+                    self.status.emit("下载已取消，可稍后继续。")
+                    self.cancelled.emit(item.name)
+                    break
                 self.file_finished.emit(item.name)
             self.finished.emit()
         except Exception as exc:
